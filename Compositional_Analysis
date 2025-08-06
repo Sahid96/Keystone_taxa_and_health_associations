@@ -1,0 +1,279 @@
+----------------------------------------------Alpha diversity-----------------------------------------------------------------------------------------------------------------------------
+# Load required libraries
+library(ggplot2)
+library(ggpubr)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(vegan)
+
+# Step 1: Load the data
+abundance <- read.csv("Sprcc_analysis.csv", row.names = 1, check.names = FALSE)
+metadata <- read.csv("Sprcc_meta.csv")
+
+# Step 2: Compute alpha diversity indices
+observed <- rowSums(abundance > 0)
+shannon <- diversity(abundance, index = "shannon")
+simpson <- diversity(abundance, index = "simpson")
+
+# Step 3: Create a combined diversity dataframe
+alpha_df <- data.frame(
+  Taxa = rownames(abundance),
+  Observed = observed,
+  Shannon = shannon,
+  Simpson = simpson
+)
+
+# Step 4: Merge with metadata
+alpha_df <- merge(alpha_df, metadata, by = "Taxa")
+
+# Step 5: Reshape to long format for plotting
+alpha_long <- pivot_longer(
+  alpha_df,
+  cols = c("Observed", "Shannon", "Simpson"),
+  names_to = "Diversity_Index",
+  values_to = "Diversity_Value"
+)
+
+# Step 6: Custom color palette
+custom_colors <- c(
+  "Chenchu" = "#008000",
+  "Irula" = "#00FFFF",
+  "Jenu Kuruba" = "#004586",
+  "Kurumba" = "#FF0000",
+  "Konda Savara" = "#FF00FF"
+)
+
+target_index <- "Observed"  # Change as needed
+
+# Filter for one diversity index
+alpha_single <- alpha_long %>% filter(Diversity_Index == target_index)
+
+# Plot
+ggplot(alpha_single, aes(x = Population, y = Diversity_Value, fill = Population)) +
+  geom_jitter(color = "gray40", width = 0.10, alpha = 0.6, size = 2.5) +
+  geom_boxplot(
+    color = "black", 
+    outlier.shape = NA, 
+    alpha = 0.7, 
+    width = 0.5, 
+    size = 1.0,    # Box border thickness
+    fatten = 3     # Median line thickness (default is 1.5, so 3 is visibly thicker)
+  ) +
+  stat_compare_means(method = "kruskal.test", label.y.npc = "top", size = 4) +
+  scale_fill_manual(values = custom_colors) +
+  labs(
+    y = paste(target_index, "Diversity"), 
+    x = NULL, 
+    title = paste(target_index, "Alpha Diversity Across Populations")
+  ) +
+  theme_minimal(base_size = 14, base_family = "Times") +  # Set Times New Roman
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, family = "Times"),
+    axis.text.y = element_text(family = "Times"),
+    axis.title.y = element_text(family = "Times", face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold", family = "Times"),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 1.1),
+    legend.position = "none"
+  )
+
+------------------------------------------------------------------------------------------------Ven diagram---------------------------------------------------------------------------------
+library(UpSetR)
+# Read CSV
+df <- read.csv("ven_diagrame.csv", stringsAsFactors = FALSE)
+
+# Clean column names
+colnames(df) <- c("Chenchu", "Irula", "Jenu_Kuruba", "Konda_Savara", "Kurumba")
+
+# Gather all unique species
+all_species <- unique(na.omit(unlist(df)))
+
+# Initialize empty binary matrix
+binary_matrix <- data.frame(Species = all_species)
+
+# For each community, mark presence (1) or absence (0)
+for (tribe in colnames(df)) {
+  binary_matrix[[tribe]] <- as.integer(all_species %in% na.omit(df[[tribe]]))
+}
+
+# Set species names as rownames and drop species column
+rownames(binary_matrix) <- binary_matrix$Species
+binary_matrix$Species <- NULL
+
+# Plot
+upset(binary_matrix,
+      sets = colnames(binary_matrix),
+      sets.bar.color = c("#008000", "#00FFFF", "#004586", "#FF00FF", "#FF0000"),
+      order.by = "freq",
+      keep.order = TRUE,
+      main.bar.color = "firebrick3",
+      matrix.color = "black",
+      point.size = 2.5,
+      line.size = 1.2,
+      number.angles = 30,
+      text.scale = 1.5)
+ 
+-----------------------------------------ven
+library(VennDiagram)
+library(gridExtra)
+# Read the CSV file (change path as needed)
+df <- read.csv("ven_diagrame.csv", stringsAsFactors = FALSE)
+
+# Create named lists from each column (remove empty strings and NAs)
+Chenchu <- na.omit(df$Chenchu[df$Chenchu != ""])
+Irula <- na.omit(df$Irula[df$Irula != ""])
+Jenu_Kuruba <- na.omit(df$Jenu.Kuruba[df$Jenu.Kuruba != ""])
+Konda_Savara <- na.omit(df$Konda.Savara[df$Konda.Savara != ""])
+Kurumba <- na.omit(df$Kurumba[df$Kurumba != ""])
+
+# Combine into a named list
+tribe_list <- list(
+  Chenchu = Chenchu,
+  Irula = Irula,
+  Jenu_Kuruba = Jenu_Kuruba,
+  Konda_Savara = Konda_Savara,
+  Kurumba = Kurumba
+)
+venn.plot <- venn.diagram(
+  x = tribe_list,
+  filename = NULL,
+  fill = c("skyblue", "orange", "green", "red", "gold"),
+  alpha = 0.5,
+  cex = 2,
+  cat.cex = 1.5,
+  cat.pos = 0,
+  cat.dist = 0.05,
+  margin = 0.05
+)
+colnames(df)
+colnames(df) <- c("Chenchu", "Irula", "Jenu_Kuruba", "Konda_Savara", "Kurumba")
+Chenchu <- na.omit(df$Chenchu[df$Chenchu != ""])
+Irula <- na.omit(df$Irula[df$Irula != ""])
+Jenu_Kuruba <- na.omit(df$Jenu_Kuruba[df$Jenu_Kuruba != ""])
+Konda_Savara <- na.omit(df$Konda_Savara[df$Konda_Savara != ""])
+Kurumba <- na.omit(df$Kurumba[df$Kurumba != ""])
+
+# Check if any of these are empty (this would cause the error)
+lengths <- sapply(list(Chenchu, Irula, Jenu_Kuruba, Konda_Savara, Kurumba), length)
+print(lengths)
+
+tribe_list <- list(
+  Chenchu = Chenchu,
+  Irula = Irula,
+  Jenu_Kuruba = Jenu_Kuruba,
+  Konda_Savara = Konda_Savara,
+  Kurumba = Kurumba
+)
+tribe_list <- tribe_list[sapply(tribe_list, length) > 0]
+library(VennDiagram)
+library(grid)
+
+venn.plot <- venn.diagram(
+  x = tribe_list,
+  filename = NULL,
+  fill = c("#008000", "#00FFFF", "#004586", "#FF00FF", "#FF0000")[1:length(tribe_list)],
+  alpha = 0.5,
+  cex = 2,
+  cat.cex = 1.5,
+  cat.pos = 0,
+  cat.dist = 0.05,
+  margin = 0.05
+)
+
+grid.newpage()
+grid.draw(venn.plot)
+-----------------------------------------------------------------------------------------Heatmap ----------------------------------------------------------------------------------------
+library(ggplot2)
+library(reshape2)
+
+# Read data
+abundance <- read.csv("simper.csv", row.names = 1, check.names = FALSE)
+
+# Melt into long format
+abundance_long <- melt(as.matrix(abundance), varnames = c("Community", "Species"))
+
+# Plot heatmap
+ggplot(abundance_long, aes(x = Species, y = Community, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "gray90", high = "firebrick3") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Heatmap of Species Abundance",
+       x = "Species",
+       y = "Community",
+       fill = "Abundance")
+
+---------------------------------------------------------------------------Heatmap for most abundant genus----------------------------------------------------------------------------------
+ Load libraries
+library(pheatmap)
+library(RColorBrewer)
+library(dplyr)
+library(grid)
+
+# === Step 1: Read and transpose abundance matrix ===
+abundance <- read.csv("map.csv", row.names = 1, check.names = FALSE)
+abundance_t <- t(abundance)  # Now: rows = species, columns = populations
+
+# === Step 2: Extract genus from species names ===
+genus_vec <- sapply(strsplit(rownames(abundance_t), "_"), `[`, 1)
+
+# === Step 3: Filter to 11 target genera ===
+target_genera <- c("Prevotella", "Bacteroides", "Bifidobacterium", "Phocaeicola",
+                   "Blautia", "Prevotellamassilia", "Roseburia",
+                   "Segatella", "Faecalibacterium", "Ruminococcus", "Treponema")
+
+# Subset species belonging to these genera
+abundance_t <- abundance_t[genus_vec %in% target_genera, ]
+genus_vec <- genus_vec[genus_vec %in% target_genera]
+
+# Check for empty matrix
+if (nrow(abundance_t) == 0) stop("No matching genera found.")
+
+# === Step 4: Log10 transform ===
+log_abundance <- log10(abundance_t + 1e-6)
+
+# === Step 5: Genus row annotation ===
+annotation_row <- data.frame(Genus = genus_vec)
+rownames(annotation_row) <- rownames(log_abundance)
+
+# === Step 6: Sort by Genus and calculate row gaps ===
+log_abundance <- log_abundance[order(annotation_row$Genus), ]
+annotation_row <- annotation_row[order(annotation_row$Genus), , drop = FALSE]
+gaps_row <- cumsum(rle(as.character(annotation_row$Genus))$lengths)
+
+# === Step 7: Column (Population) colors ===
+custom_colors <- c(
+  "Irula" = "#00FFFF",
+  "Jenu Kuruba" = "#004586",
+  "Kurumba" = "#FF0000",
+  "Chenchu" = "#008000",
+  "Konda Savara" = "#FF00FF"
+)
+
+annotation_col <- data.frame(Population = colnames(log_abundance))
+rownames(annotation_col) <- colnames(log_abundance)
+annotation_col$Population <- factor(annotation_col$Population, levels = names(custom_colors))
+ann_colors <- list(Population = custom_colors)
+
+# === Step 8: Draw & Save SVG ===
+p <- pheatmap(log_abundance,
+              cluster_cols = FALSE,
+              cluster_rows = FALSE,
+              annotation_row = annotation_row,
+              annotation_col = annotation_col,
+              annotation_colors = ann_colors,
+              gaps_row = gaps_row,
+              show_colnames = TRUE,
+              show_rownames = TRUE,
+              fontsize_row = 3,
+              color = colorRampPalette(rev(brewer.pal(9, "Blues")))(100),
+              border_color = NA,  # Visible border
+              cellheight = 3,
+              cellwidth = 10,
+              main = "11 Genus-specific Species Abundance (log10)")
+
+svg("genus_14_block_heatmap.svg", width = 10, height = 10, family = "Times New Roman")
+grid.newpage()
+grid.draw(p$gtable)
+dev.off()
