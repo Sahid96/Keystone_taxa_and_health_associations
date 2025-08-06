@@ -8,8 +8,8 @@ library(tidyr)
 library(vegan)
 
 # Step 1: Load the data
-abundance <- read.csv("Sprcc_analysis.csv", row.names = 1, check.names = FALSE)
-metadata <- read.csv("Sprcc_meta.csv")
+abundance <- read.csv("file.csv", row.names = 1, check.names = FALSE)
+metadata <- read.csv("file_meta.csv")
 
 # Step 2: Compute alpha diversity indices
 observed <- rowSums(abundance > 0)
