@@ -1,0 +1,195 @@
+--------------------------------------------------------------------Network Analysis of the Keystone taxa-----------------------------------------------------------------------------------
+# Load libraries
+library(tidygraph)
+library(tidyverse)
+library(compositions)
+library(igraph)
+library(qgraph)
+library(Hmisc)
+library(reshape2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+library(Hmisc)
+library(reshape2)
+library(ggraph)
+
+library(ggrepel)
+# --- Load data ---
+# Read abundance and metadata
+abundance_raw <- read.csv("Normalized_Core_Taxa_Abundance.csv", check.names = FALSE)
+metadata <- read.csv("Sprcc_meta.csv", stringsAsFactors = FALSE)
+
+# Set sample IDs as rownames
+rownames(abundance_raw) <- abundance_raw$Taxa
+abundance <- abundance_raw[, -1]  # Remove 'Taxa' column
+
+# --- Filter rare taxa ---
+taxa_prevalence <- colSums(abundance > 0)
+abundance_filtered <- abundance[, taxa_prevalence > 0]
+
+# --- CLR transformation ---
+clr_data <- clr(abundance_filtered + 1e-6)  # Avoid log(0)
+
+# --- Correlation matrix ---
+cor_matrix <- cor(clr_data, method = "pearson")
+cor_matrix[is.na(cor_matrix)] <- 0
+cor_matrix[abs(cor_matrix) < 0.3] <- 0  # Filter weak correlations
+
+# --- Create igraph network ---
+network <- graph_from_adjacency_matrix(cor_matrix, mode = "undirected", weighted = TRUE, diag = FALSE)
+network <- delete.vertices(network, degree(network) == 0)
+network <- delete_edges(network, which(E(network)$weight <= 0))
+
+# --- Save edge weights ---
+edge_weights <- E(network)$weight
+edge_colors <- ifelse(edge_weights > 0, "tomato", "steelblue")
+
+# --- Centrality metrics ---
+deg <- degree(network)
+btw <- betweenness(network)
+clo <- closeness(network)
+
+centrality_df <- data.frame(
+  Taxa = names(deg),
+  Degree = deg,
+  Betweenness = btw,
+  Closeness = clo
+)
+
+# --- Identify core keystone taxa (top 15) ---
+core_taxa <- centrality_df %>%
+  arrange(desc(Degree), desc(Betweenness)) %>%
+  slice_head(n = 15)
+
+# --- Assign community (tribe) to each node ---
+metadata$Taxa <- trimws(metadata$Taxa)
+V(network)$name <- trimws(V(network)$name)
+taxa_to_community <- setNames(metadata$Population, metadata$Taxa)
+V(network)$Community <- taxa_to_community[V(network)$name]
+
+# --- Tag nodes as core or non-core ---
+V(network)$is_core <- ifelse(V(network)$name %in% core_taxa$Taxa, "core", "non-core")
+
+# --- Custom colors for communities ---
+custom_colors <- c(
+  "Chenchu" = "#008000",
+  "Irula" = "#00FFFF",
+  "Jenu Kuruba" = "#004586",
+  "Kurumba" = "#FF0000",
+  "Konda Savara" = "#FF00FF"
+)
+
+# --- Convert to tidygraph ---
+network_tbl <- as_tbl_graph(network)
+
+# --- Plot network ---
+ggraph(network_tbl, layout = "fr") +
+  geom_edge_link(color = "#008000", alpha = 0.8) +
+  geom_node_point(aes(color = Community, size = is_core), alpha = 0.9) +
+  geom_node_text(aes(label = ifelse(is_core == "core", name, "")),
+                 repel = TRUE, size = 3.5, fontface = "bold", color = "black", max.overlaps = Inf) +
+  scale_color_manual(values = custom_colors, na.value = "gray50") +
+  scale_size_manual(values = c("core" = 6, "non-core" = 3)) +
+  theme_void() +
+  theme(legend.position = "right") +
+  ggtitle("SparCC Co-occurrence Network\nCore Keystone Taxa Highlighted by Community")
+
+# --- Save core taxa to CSV (optional) ---
+write.csv(core_taxa, "core_keystone_taxa_top15.csv", row.names = FALSE)
+
+
+ggraph(network_tbl, layout = "fr") +
+  geom_edge_link(color = "gray80", alpha = 0.8) +
+  geom_node_point(aes(color = is_core, size = is_core), alpha = 0.8) +
+  geom_node_text(
+    aes(label = ifelse(is_core == "core", name, "")),
+    repel = TRUE,
+    color = "black",
+    size = 3.5,
+    fontface = "bold",
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(values = c("core" = "#FF00FF", "non-core" = "#004586")) +
+  scale_size_manual(values = c("core" = 8, "non-core" = 2.5)) +
+  theme_void() +
+  theme(legend.position = "none") +
+  ggtitle("Core Keystone Taxa in SparCC Co-occurrence Network")
+
+
+clustering <- cluster_louvain(network)
+V(network)$Community <- as.factor(membership(clustering))
+
+ggraph(as_tbl_graph(network), layout = "fr") +
+  geom_edge_link(color = "gray85", alpha = 0.8) +
+  geom_node_point(aes(color = Community, size = is_core), alpha = 0.9) +
+  geom_node_text(aes(label = ifelse(is_core == "core", name, "")), 
+                 repel = TRUE, size = 3.5, fontface = "bold", color = "black", max.overlaps = Inf) +
+  scale_size_manual(values = c("core" = 8, "non-core" = 2.5)) +
+  theme_void() +
+  ggtitle("SparCC Network: Core Keystone Taxa and Community Clusters")
+
+---------------------------------------------------------------------Alluvial plot of the differentially abundant species-------------------------------------------------------------------
+# Load required libraries
+library(tidyverse)
+library(ggalluvial)
+
+# Step 1: Load data
+df <- read.csv("alluvial.csv", check.names = FALSE)
+
+# Step 2: Remove Taxa (sample ID) and group by Population
+df_summarized <- df %>%
+  select(-Taxa) %>%
+  group_by(Population) %>%
+  summarise(across(everything(), ~ sum(as.numeric(.), na.rm = TRUE)), .groups = "drop")
+
+# Step 3: Get top 12 abundant species across all populations
+top_species <- df_summarized %>%
+  pivot_longer(-Population, names_to = "Species", values_to = "Count") %>%
+  group_by(Species) %>%
+  summarise(Total = sum(Count)) %>%
+  arrange(desc(Total)) %>%
+  slice_head(n = 16) %>%
+  pull(Species)
+
+# Step 4: Filter for top species and convert to relative abundance
+df_top <- df_summarized %>%
+  select(Population, all_of(top_species))
+
+df_rel_abund <- df_top %>%
+  rowwise() %>%
+  mutate(total = sum(c_across(-Population))) %>%
+  mutate(across(-c(Population, total), ~ . / total)) %>%
+  select(-total) %>%
+  ungroup()
+
+# Step 5: Pivot longer for ggalluvial format
+df_long <- df_rel_abund %>%
+  pivot_longer(-Population, names_to = "Species", values_to = "Relative_abundance")
+
+# Step 5.5: Reorder Population names
+population_order <- c("Chenchu", "Irula", "Jenu Kuruba", "Konda Savara", "Kurumba")
+df_long$Population <- factor(df_long$Population, levels = population_order)
+
+# Step 6: Final alluvial plot with custom colors
+ggplot(df_long,
+       aes(x = Population, stratum = Species, alluvium = Species,
+           y = Relative_abundance, fill = Species, label = Species)) +
+  geom_flow(alpha = 0.7, curve_type = "cubic") +  # <- No color argument
+  geom_stratum(width = 0.25, color = "black", alpha = 2) +  # <- Hide stratum outlines
+  geom_text(stat = "stratum", size = 3, angle = 90) +
+  scale_x_discrete(expand = c(.05, .05)) +
+  scale_fill_manual(values = c("gray40","peachpuff3",  
+                               "yellow", "pink", "brown", "orange3", "violetred1", "seagreen3", "orange", 
+                               "lightgrey", "plum3", "palegreen", "green3", 
+                               "red","mediumorchid4","aquamarine1")) +
+  theme_minimal(base_size = 16) +
+  labs(x = NULL, y = "Relative Abundance", fill = "Species") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+
+
