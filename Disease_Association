@@ -1,0 +1,302 @@
+---------------------------------------------------------------------Extracted Data (CuratedMetagenomeData)---------------------------------------------------------------------------------
+# Load libraries
+library(ExperimentHub)
+library(SummarizedExperiment)
+
+# Connect to ExperimentHub
+eh <- ExperimentHub()
+
+query_res <- query(eh, "WirbelJ 2018")
+print(query_res)
+
+# Load the dataset
+se <- eh[["EH5890"]]  # SankaranarayananK_2015.relative_abundance
+no
+# `se` is already the abundance matrix
+abundance <- se
+
+# Filter only species-level rows
+species_only <- abundance[grepl("s__", rownames(abundance)), ]
+
+# Save species-level abundance
+write.csv(as.data.frame(species_only), "WirbelJ2018_species_abundance.csv", quote = FALSE)
+
+-----------------------------------------------------------------------Significant Association (Wilcoxon rank sum test)--------------------------------------------------------------------
+# Step 1: Load required packages
+library(tidyverse)
+library(dplyr)
+library(data.table)
+library(stats)
+library(qvalue)
+
+# Step 2: Read input files
+abundance_data <- read.csv("ZhuF 2020_Schizophrenia.csv", row.names = 1, check.names = FALSE)
+core_taxa <- read.csv("Core_taxa.csv", header = TRUE)
+
+# Step 3: Extract metadata and core taxa list
+metadata <- abundance_data[, "Disease_Category", drop = FALSE]
+core_taxa_list <- core_taxa$Taxa
+
+# Step 4: Extract taxa columns matching core taxa
+core_taxa_present <- intersect(core_taxa_list, colnames(abundance_data))
+abundance_core <- abundance_data[, core_taxa_present]
+
+# Step 5: Normalize abundances by row sum (relative abundance)
+normalized_abund <- abundance_core / rowSums(abundance_core + 1e-10)
+
+# Step 6: Wilcoxon test with extended metrics
+results <- data.frame(
+  Taxon = character(),
+  p_value = numeric(),
+  q_value = numeric(),
+  median_disease = numeric(),
+  median_control = numeric(),
+  mean_disease = numeric(),
+  mean_control = numeric(),
+  nonzero_disease = integer(),
+  nonzero_control = integer(),
+  Direction = character(),
+  Association = character(),
+  stringsAsFactors = FALSE
+)
+
+for (taxon in colnames(normalized_abund)) {
+  group_control <- normalized_abund[metadata$Disease_Category == "control", taxon]
+  group_disease <- normalized_abund[metadata$Disease_Category == "disease", taxon]
+  
+  # Basic statistics
+  median_disease_val <- median(group_disease, na.rm = TRUE)
+  median_control_val <- median(group_control, na.rm = TRUE)
+  mean_disease_val <- mean(group_disease, na.rm = TRUE)
+  mean_control_val <- mean(group_control, na.rm = TRUE)
+  nonzero_disease_val <- sum(group_disease > 0, na.rm = TRUE)
+  nonzero_control_val <- sum(group_control > 0, na.rm = TRUE)
+  
+  # Wilcoxon test
+  test <- wilcox.test(group_disease, group_control)
+  p_val <- test$p.value
+  
+  # Direction
+  direction <- ifelse(median_disease_val > median_control_val, 
+                      "Increased in Disease", 
+                      "Decreased in Disease")
+  
+  # Store result
+  results <- rbind(results, data.frame(
+    Taxon = taxon,
+    p_value = p_val,
+    q_value = NA,  # Will update later
+    median_disease = median_disease_val,
+    median_control = median_control_val,
+    mean_disease = mean_disease_val,
+    mean_control = mean_control_val,
+    nonzero_disease = nonzero_disease_val,
+    nonzero_control = nonzero_control_val,
+    Direction = direction,
+    Association = "NS"
+  ))
+}
+
+# Step 7: FDR correction
+results$q_value <- p.adjust(results$p_value, method = "BH")
+
+# Step 8: Update association based on q-value ≤ 0.15
+results$Association <- ifelse(
+  results$q_value <= 0.15 & results$Direction == "Increased in Disease", "SP",
+  ifelse(results$q_value <= 0.15 & results$Direction == "Decreased in Disease", "SN", "NS")
+)
+
+# Step 9: Save full result table
+write.csv(results, "Wilcoxon_Taxon_Association_ZhuF_2020_Schizophrenia.csv", row.names = FALSE)
+
+# Step 10: Summary of results
+print(table(results$Association))
+
+---------------------------------------------------------------------------(10) Iterations--------------------------------------------------------------------------------------------------
+# Load necessary package
+library(dplyr)
+
+# Step 1: Read the association matrix file
+assoc_matrix <- read.csv("HS_value.csv", stringsAsFactors = FALSE)
+taxa <- assoc_matrix$Taxon
+assoc_matrix <- assoc_matrix[, -1]  # remove the Taxon column
+
+# Step 2: HS computation function for a subset of disease categories
+compute_HS <- function(row_vector) {
+  sp <- sum(row_vector == "SP", na.rm = TRUE)
+  sn <- sum(row_vector == "SN", na.rm = TRUE)
+  ns <- sum(row_vector == "NS", na.rm = TRUE)
+  denom <- sp + sn + ns
+  if (denom == 0) {
+    return(NA)
+  } else {
+    return((sn - sp) / denom)
+  }
+}
+
+# Step 3: Perform 10 iterations, sampling 10 diseases each time
+set.seed(42)
+iterations <- 10
+hs_matrix <- matrix(NA, nrow = nrow(assoc_matrix), ncol = iterations)
+
+for (i in 1:iterations) {
+  sampled_diseases <- sample(colnames(assoc_matrix), size = 10, replace = FALSE)
+  subset_matrix <- assoc_matrix[, sampled_diseases]
+  hs_iter <- apply(subset_matrix, 1, compute_HS)
+  hs_matrix[, i] <- hs_iter
+}
+
+# Step 4: Aggregate HS across 10 iterations
+final_HS <- rowMeans(hs_matrix, na.rm = TRUE)
+
+# Step 5: Output
+hs_df <- data.frame(
+  Taxon = taxa,
+  HS_iteration_mean = final_HS
+)
+
+write.csv(hs_df, "HS_10iteration_final.csv", row.names = FALSE)
+
+# Step 6 (optional): View top HS taxa
+print(head(hs_df[order(-hs_df$HS_iteration_mean), ], 20))
+
+----------------------------------------------------------------------Heatmap for visual representation-------------------------------------------------------------------------------------
+# Load required libraries
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+
+# Step 1: Load data
+assoc <- read.csv("HS_value.csv", stringsAsFactors = FALSE)
+rownames(assoc) <- assoc$Taxon
+assoc$Taxon <- NULL
+
+# Step 2: Convert labels to numeric matrix
+assoc_numeric <- assoc
+assoc_numeric[assoc == "SP"] <- 1
+assoc_numeric[assoc == "SN"] <- -1
+assoc_numeric[assoc == "NS"] <- 0
+assoc_numeric[assoc == "NA"] <- NA
+
+# Ensure matrix is numeric
+assoc_numeric <- as.data.frame(lapply(assoc_numeric, as.numeric))
+rownames(assoc_numeric) <- rownames(assoc)
+
+# Step 3: Compute SP/SN counts per taxon and sort by SN (descending)
+SP_counts <- rowSums(assoc == "SP", na.rm = TRUE)
+SN_counts <- rowSums(assoc == "SN", na.rm = TRUE)
+taxa_order <- order(SN_counts, decreasing = TRUE)
+top_taxa <- taxa_order[1:50]  # Select top 50 taxa by SN count
+
+# Subset and transpose the matrix
+mat <- assoc_numeric[top_taxa, ]
+rownames(mat) <- rownames(assoc_numeric)[top_taxa]
+mat_t <- t(as.matrix(mat))  # Diseases as rows, taxa as columns
+
+# Step 4: Barplot annotation for sorted taxa (by SN)
+bar_anno <- HeatmapAnnotation(
+  SP = anno_barplot(SP_counts[top_taxa], gp = gpar(fill = "red"), height = unit(2, "cm")),
+  SN = anno_barplot(SN_counts[top_taxa], gp = gpar(fill = "green"), height = unit(2, "cm")),
+  annotation_name_side = "left"
+)
+
+# Step 5: Color scale
+col_fun <- colorRamp2(c(-1, 0, 1), c("green", "white", "red"))
+
+# Step 6: Plot with grid, labels, and no clustering
+Heatmap(
+  matrix = mat_t,
+  name = "Association",
+  col = col_fun,
+  top_annotation = bar_anno,
+  column_title = "Top 50 Core Taxa (sorted by SN count)",
+  row_title = "Diseases",
+  show_column_names = TRUE,
+  show_row_names = TRUE,
+  column_names_rot = 45,
+  row_names_gp = gpar(fontsize = 9),
+  column_names_gp = gpar(fontsize = 8),
+  na_col = "grey90",
+  border = TRUE,
+  rect_gp = gpar(col = "black", lwd = 0.5),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE
+)
+
+# Step 6: Plot with Times New Roman font
+Heatmap(
+  matrix = mat_t,
+  name = "Association",
+  col = col_fun,
+  top_annotation = bar_anno,
+  column_title = "Top 50 Core Taxa (sorted by SN count)",
+  row_title = "Diseases",
+  show_column_names = TRUE,
+  show_row_names = TRUE,
+  column_names_rot = 45,
+  row_names_gp = gpar(fontsize = 9, fontfamily = "Times"),
+  column_names_gp = gpar(fontsize = 8, fontfamily = "Times"),
+  na_col = "grey90",
+  border = TRUE,
+  rect_gp = gpar(col = "black", lwd = 0.5),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE
+)
+
+------------------------------------------------------------Health association score assignment---------------------------------------------------------------------------------------------
+
+# Load required library
+library(tidyverse)
+
+# Step 1: Load data
+hs_data <- read.csv("HS_Scores_Sorted.csv", stringsAsFactors = FALSE)
+
+# Step 2: Handle NA values and assign colors
+hs_data <- hs_data %>%
+  mutate(
+    HS_numeric = as.numeric(HS),  # Ensure HS is numeric
+    color = case_when(
+      is.na(HS_numeric) ~ "grey60",      # NA: not found in any disease
+      HS_numeric > 0 ~ "green",          # SN-dominant (depleted in disease)
+      HS_numeric < 0 ~ "red",            # SP-dominant (enriched in disease)
+      TRUE ~ "black"                     # Exactly 0 (neutral)
+    )
+  )
+
+# Step 3: Set factor levels to control x-axis order
+hs_data <- hs_data %>%
+  mutate(
+    Taxon = factor(Taxon, levels = Taxon[order(-HS_numeric, na.last = FALSE)])
+  )
+
+# Step 4: Plot
+ggplot(hs_data, aes(x = Taxon, y = HS_numeric, fill = color)) +
+  geom_bar(stat = "identity") +
+  scale_fill_identity() +
+  theme_minimal(base_family = "Times") +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 1, size = 6),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    panel.grid.major.x = element_blank()
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  ylab("Health Association Score (HS)") +
+  ggtitle("Core Taxa HS Score (Including NA Values)")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
