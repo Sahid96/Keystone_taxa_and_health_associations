@@ -1,0 +1,269 @@
+-----------------------------------------------------------------RRR workflow to identify the Keystone taxa using (Envfit) approach -------------------------------------------------------
+# Load required package
+library(vegan)
+
+# Step 0: Load abundance table
+abundance <- read.csv("Sprcc_analysis.csv", row.names = 1, check.names = FALSE)
+
+# Initialize result storage
+results <- data.frame(Taxon = character(), R2 = numeric(), P = numeric(), Prevalence = numeric(), stringsAsFactors = FALSE)
+
+# Total number of samples
+n_samples <- nrow(abundance)
+
+# Loop through each taxon/species
+for (taxon in colnames(abundance)) {
+  cat("Processing:", taxon, "\n")
+  
+  # Step 1: Extract and remove taxon
+  taxon_vector <- abundance[[taxon]]
+  abundance_no_taxon <- abundance[, colnames(abundance) != taxon]
+  
+  # Skip if removing this taxon leaves < 2 taxa
+  if (ncol(abundance_no_taxon) < 2) next
+  
+  # Step 2: Renormalize
+  abundance_renormalized <- abundance_no_taxon / rowSums(abundance_no_taxon)
+  
+  # Step 3: Bray-Curtis distance & PCoA
+  dist_matrix <- vegdist(abundance_renormalized, method = "bray")
+  pcoa <- cmdscale(dist_matrix, k = 2, eig = TRUE)
+  
+  # Step 4: envfit correlation
+  fit <- envfit(pcoa$points, taxon_vector, permutations = 999)
+  
+  # Step 5: Get R² and p-value
+  r2_val <- fit$vectors$r
+  p_val <- fit$vectors$pvals
+  
+  # Step 6: Calculate prevalence (percent of samples with abundance > 0)
+  prevalence <- sum(taxon_vector > 0) / n_samples
+  
+  # Store result
+  results <- rbind(results, data.frame(
+    Taxon = taxon,
+    R2 = r2_val^2,
+    P = p_val,
+    Prevalence = prevalence
+  ))
+}
+
+# Step 7: Filter taxa with prevalence ≥ 0.65
+prevalent_taxa <- subset(results, Prevalence >= 0.65)
+
+# Step 8: Select taxa in top 70% R²
+r2_threshold <- quantile(prevalent_taxa$R2, probs = 0.3)  # top 70% = drop bottom 30%
+core_taxa <- subset(prevalent_taxa, R2 >= r2_threshold)
+
+# Step 9: Sort and save
+core_taxa <- core_taxa[order(-core_taxa$R2), ]
+write.csv(core_taxa, "Konda_savara_3R_core_taxa_filtered.csv", row.names = FALSE)
+
+# Optional: also save full table
+write.csv(results, "Konda_savara_3R_all_taxa_with_prevalence.csv", row.names = FALSE)
+
+# Preview result
+print(head(core_taxa, 10))
+------------------------------------------------------------------------------Identification of the community effect of a induvial taxon---------------------------------------------------- 
+# Load libraries
+library(vegan)
+library(ggplot2)
+library(patchwork)
+library(grid)  # for arrow function
+
+# STEP 1: Load your abundance table (samples x taxa)
+abundance <- read.csv("Sprcc_analysis.csv", row.names = 1, check.names = FALSE)
+
+# Define taxon of interest
+target_taxon <- "Parabacteroides_distasonis"
+
+# Extract the abundance vector of the taxon
+taxon_vector <- abundance[[target_taxon]]
+
+# Remove the taxon from the table
+abundance_no_taxon <- abundance[, colnames(abundance) != target_taxon]
+
+# Renormalize (relative abundance)
+abundance_renormalized <- abundance_no_taxon / rowSums(abundance_no_taxon)
+
+# STEP 2: Bray-Curtis distance matrices
+dist_before <- vegdist(abundance, method = "bray")
+dist_after <- vegdist(abundance_renormalized, method = "bray")
+
+# STEP 3: PCoA
+pcoa_before <- cmdscale(dist_before, k = 2, eig = TRUE)
+pcoa_after <- cmdscale(dist_after, k = 2, eig = TRUE)
+
+# Calculate % variance explained
+var_explained <- round(100 * (pcoa_before$eig / sum(pcoa_before$eig))[1:2], 1)
+
+# Create dataframes for plotting
+df_before <- data.frame(PCoA1 = pcoa_before$points[, 1],
+                        PCoA2 = pcoa_before$points[, 2],
+                        Abundance = taxon_vector)
+
+# After removal, abundance of the removed taxon is zero
+df_after <- data.frame(PCoA1 = pcoa_after$points[, 1],
+                       PCoA2 = pcoa_after$points[, 2],
+                       Abundance = rep(0, length(taxon_vector)))
+
+# STEP 4: Run envfit on both
+fit_before <- envfit(pcoa_before$points, taxon_vector, permutations = 999)
+fit_after <- envfit(pcoa_after$points, taxon_vector, permutations = 999)
+
+arrow_before <- as.data.frame(scores(fit_before, display = "vectors"))
+colnames(arrow_before) <- c("PCoA1", "PCoA2")
+arrow_before$taxon <- target_taxon
+
+arrow_after <- as.data.frame(scores(fit_after, display = "vectors"))
+colnames(arrow_after) <- c("PCoA1", "PCoA2")
+arrow_after$taxon <- target_taxon
+
+# STEP 5: PCoA plots
+p_before <- ggplot(df_before, aes(x = PCoA1, y = PCoA2, color = Abundance)) +
+  geom_point(size = 2) +
+  scale_color_gradient(low = "gray80", high = "firebrick") +
+  geom_segment(data = arrow_before, aes(x = 0, y = 0, xend = PCoA1, yend = PCoA2),
+               arrow = arrow(length = unit(0.08, "cm")), color = "blue", size = 1) +
+  geom_text(data = arrow_before, aes(x = PCoA1 * 1.1, y = PCoA2 * 1.1, label = taxon),
+            color = "blue", size = 1) +
+  labs(title = paste("Before Removal:", target_taxon),
+       subtitle = paste("PCoA1:", var_explained[1], "% | PCoA2:", var_explained[2], "%")) +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5))
+
+p_after <- ggplot(df_after, aes(x = PCoA1, y = PCoA2, color = Abundance)) +
+  geom_point(size = 2) +
+  scale_color_gradient(low = "gray80", high = "firebrick", limits = c(0, max(taxon_vector))) +
+  geom_segment(data = arrow_after, aes(x = 0, y = 0, xend = PCoA1, yend = PCoA2),
+               arrow = arrow(length = unit(0.08, "cm")), color = "blue", size = 1) +
+  geom_text(data = arrow_after, aes(x = PCoA1 * 1.1, y = PCoA2 * 1.1, label = taxon),
+            color = "blue", size = 1) +
+  labs(title = paste("After Removal:", target_taxon),
+       subtitle = paste("PCoA1:", var_explained[1], "% | PCoA2:", var_explained[2], "%")) +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5))
+
+# STEP 6: Procrustes analysis to assess shape shift
+proc <- protest(pcoa_before$points, pcoa_after$points, permutations = 999)
+cat("Procrustes R²:", proc$ss, "\n")
+cat("Procrustes p-value:", proc$signif, "\n")
+
+# STEP 7: Bray–Curtis delta
+bc_delta <- mean(as.vector(dist_before - dist_after))
+cat("Mean Bray–Curtis Δ:", round(bc_delta, 4), "\n")
+
+# STEP 8: Show plots side-by-side
+p_before + p_after + plot_layout(ncol = 2)
+
+------------------------------------------------------------------With differnt objective visualization
+library(vegan)
+library(ggplot2)
+library(patchwork)  # for side-by-side plots
+
+# Load abundance data
+abundance <- read.csv("Sprcc_analysis.csv", row.names = 1, check.names = FALSE)
+target_taxon <- "Phocaeicola_vulgatus"
+
+# Save original taxon vector
+taxon_vector <- abundance[[target_taxon]]
+
+# ---------------------- PCoA BEFORE REMOVAL ----------------------
+
+# Normalize full data
+abundance_norm_full <- abundance / rowSums(abundance)
+
+# Bray-Curtis distance and PCoA
+dist_before <- vegdist(abundance_norm_full, method = "bray")
+pcoa_before <- cmdscale(dist_before, k = 2, eig = TRUE)
+
+# Prepare data frame
+df_before <- as.data.frame(pcoa_before$points)
+colnames(df_before) <- c("PCoA1", "PCoA2")
+df_before$SampleID <- rownames(df_before)
+df_before$Abundance <- taxon_vector
+
+# Plot before
+p_before <- ggplot(df_before, aes(x = PCoA1, y = PCoA2, color = Abundance)) +
+  geom_point(size = 3) +
+  scale_color_gradient(low = "gray8", high = "firebrick") +
+  labs(
+    title = paste("Before removing:", target_taxon),
+    color = paste(target_taxon, "abundance")
+  ) +
+  theme_minimal()
+
+# ---------------------- PCoA AFTER REMOVAL ----------------------
+
+# Remove target taxon and renormalize
+abundance_no_taxon <- abundance[, colnames(abundance) != target_taxon]
+abundance_renorm <- abundance_no_taxon / rowSums(abundance_no_taxon)
+
+# Bray-Curtis distance and PCoA
+dist_after <- vegdist(abundance_renorm, method = "bray")
+pcoa_after <- cmdscale(dist_after, k = 2, eig = TRUE)
+
+# Prepare data frame
+df_after <- as.data.frame(pcoa_after$points)
+colnames(df_after) <- c("PCoA1", "PCoA2")
+df_after$SampleID <- rownames(df_after)
+df_after$Abundance <- taxon_vector
+
+# Plot after
+p_after <- ggplot(df_after, aes(x = PCoA1, y = PCoA2, color = Abundance)) +
+  geom_point(size = 3) +
+  scale_color_gradient(low = "gray8", high = "firebrick") +
+  labs(
+    title = paste("After removing:", target_taxon),
+    color = paste(target_taxon, "abundance")
+  ) +
+  theme_minimal()
+
+# ---------------------- Combine both plots ----------------------
+p_before + p_after + plot_layout(ncol = 2)
+-------------------------------------------------------------Visualise identified core associated and influential taxa---------------------------------------------------------------------
+# Load libraries
+library(ggplot2)
+library(dplyr)
+
+# Load and process data
+df <- read.csv("Core_influential_taxa.csv")
+df <- df %>%
+  arrange(Count) %>%
+  mutate(Index = row_number(),
+         Percent = (Index / n()) * 100,
+         Taxa = factor(Taxa, levels = Taxa))
+
+# Plot
+p <- ggplot(df, aes(x = Percent, y = Count)) +
+  geom_point(color = "blue", size = 2.5) +
+  geom_text(
+    aes(label = Taxa),
+    angle = 90, hjust = 1, vjust = 0.5,  # Text aligned to the top of the point
+    size = 3.2, family = "Times"
+  ) +
+  scale_x_continuous(limits = c(0, 100), breaks = seq(0, 100, 10)) +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.02))) +
+  coord_cartesian(clip = "on") +  # CLIP ON → all content stays inside the box
+  theme_minimal(base_size = 11, base_family = "Times") +
+  theme(
+    axis.text.x = element_text(size = 10, family = "Times"),
+    axis.text.y = element_text(size = 10, family = "Times"),
+    axis.title.x = element_text(family = "Times"),
+    axis.title.y = element_text(family = "Times"),
+    axis.ticks = element_line(color = "black"),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.3),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(t = 20, r = 40, b = 10, l = 10)
+  ) +
+  labs(
+    x = "Sorted Taxa (% index)",
+    y = "Number of studies where taxa\nis identified as Core/Keystone"
+  )
+
+# Save as PDF
+ggsave("core_keystone_influential_taxa_insidebox.pdf", plot = p, width = 12, height = 6, units = "in", dpi = 600)
+
+
+
