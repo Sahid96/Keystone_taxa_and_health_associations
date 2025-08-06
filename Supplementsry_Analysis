@@ -1,0 +1,788 @@
+---------------------------------------------------Distance based redundancy analysis-------------------------------------------------------------------------------------------------
+# Load libraries
+library(vegan)
+library(tidyverse)
+
+# Load your data
+abund <- read.csv("threshould.csv", row.names = 1, check.names = FALSE)
+meta <- read.csv("Redundancy_meta.csv", check.names = FALSE)
+
+# Align data
+meta <- meta %>% filter(SampleID %in% rownames(abund))
+abund <- abund[meta$SampleID, ]
+rownames(meta) <- meta$SampleID
+
+# Compute Bray-Curtis distance
+abund_dist <- vegdist(abund, method = "bray")
+
+#  Variables to test
+vars_to_test <- c("Acculturation", "Population", "Sex", "Smoking", "Chewing", "Drinking")
+
+#  Run db-RDA for each variable and store R2 + p-value + simulated SE
+results <- data.frame()
+
+for (var in vars_to_test) {
+  formula <- as.formula(paste("abund_dist ~", var))
+  model <- capscale(formula, data = meta)
+  
+  # Adjusted R2
+  adjR2 <- RsquareAdj(model)$adj.r.squared * 100
+  
+  # Permutation p-value
+  perm <- anova(model, permutations = 999)
+  pval <- perm$"Pr(>F)"[1]
+  
+  # Approximate standard deviation of R2 using permutations
+  perm_R2 <- numeric(999)
+  for (i in 1:999) {
+    perm_meta <- meta
+    perm_meta[[var]] <- sample(perm_meta[[var]])
+    perm_model <- capscale(abund_dist ~ perm_meta[[var]])
+    perm_R2[i] <- RsquareAdj(perm_model)$adj.r.squared * 100
+  }
+  se <- sd(perm_R2)
+  
+  # Store
+  results <- rbind(results, data.frame(Variable = var, R2 = adjR2, SE = se, pval = pval))
+}
+
+#  Format for plotting
+results <- results %>% arrange(desc(R2))
+
+#  Plot
+ggplot(results, aes(x = reorder(Variable, R2), y = R2)) +
+  geom_col(fill = "steelblue") +
+  geom_errorbar(aes(ymin = R2 - SE, ymax = R2 + SE), width = 0.3) +
+  geom_text(aes(label = ifelse(pval < 0.001, "***",
+                               ifelse(pval < 0.01, "**",
+                                      ifelse(pval < 0.05, "*", ""))),
+                y = R2 + SE + 0.3), size = 5) +
+  coord_flip() +
+  labs(title = "db-RDA Variance Explained with Significance",
+       x = NULL,
+       y = "Variance Explained (%)",
+       caption = "* p < 0.05, ** p < 0.01, *** p < 0.001") +
+  theme_minimal(base_size = 14)
+write.csv(results, "pvalue_dbRDA_variance_with_pvalues.csv", row.names = FALSE)
+
+------------------------------------------------------------------------------------Prevalence threshold detection--------------------------------------------------------------------------
+# 📦 Load required libraries
+library(tidyverse)
+library(vegan)
+
+# 📂 Load input files
+abundance <- read.csv("threshould.csv", row.names = 1, check.names = FALSE)
+metadata <- read.csv("metadata.csv")
+
+# 🔁 Prepare data
+abundance$SampleID <- rownames(abundance)
+abund_t <- abundance
+data_merged <- left_join(abund_t, metadata, by = "SampleID")
+
+# 📉 Prevalence thresholds: 5% to 100%
+thresholds <- seq(0.05, 1.0, by = 0.05)
+results_list <- list()
+
+# 🔁 Loop through each prevalence threshold
+for (p in thresholds) {
+  taxa_cols <- setdiff(colnames(data_merged), c("SampleID", "Population"))
+  taxa_only <- data_merged[, taxa_cols]
+  
+  prevalence <- colSums(taxa_only > 0) / nrow(taxa_only)
+  core_taxa <- names(prevalence[prevalence >= p])
+  if (length(core_taxa) == 0) next
+  
+  # 🔁 Loop through samples instead of populations
+  for (i in 1:nrow(data_merged)) {
+    sample_row <- data_merged[i, ]
+    sample_taxa <- sample_row[, core_taxa, drop = FALSE]
+    sample_present_taxa <- names(sample_taxa)[sample_taxa > 0]
+    
+    jaccard <- if (length(sample_present_taxa) > 0 && length(core_taxa) > 0) {
+      length(intersect(sample_present_taxa, core_taxa)) / length(union(sample_present_taxa, core_taxa))
+    } else NA
+    
+    cumulative_abund <- sum(sample_taxa, na.rm = TRUE)
+    
+    results_list[[length(results_list) + 1]] <- data.frame(
+      Prevalence = p,
+      SampleID = sample_row$SampleID,
+      Population = sample_row$Population,
+      Jaccard = jaccard,
+      CumulativeAbundance = cumulative_abund
+    )
+  }
+}
+
+# 🔗 Combine results
+results <- bind_rows(results_list)
+
+# 🛠️ Reshape for plotting
+plot_data <- results %>%
+  pivot_longer(cols = c(Jaccard, CumulativeAbundance),
+               names_to = "Metric", values_to = "Value")
+
+# 🖼️ Plot 1: Overlaid boxplot
+p1 <- ggplot(plot_data, aes(
+  x = Prevalence,
+  y = Value,
+  fill = Metric,
+  group = interaction(Prevalence, Metric)
+)) +
+  geom_boxplot(
+    position = position_dodge(width = 0.6),
+    width = 0.5,
+    outlier.shape = NA,
+    color = "black"
+  ) +
+  scale_fill_manual(values = c(
+    "Jaccard" = "#1f77b4B3",
+    "CumulativeAbundance" = "#2ca02cB3"
+  )) +
+  geom_vline(xintercept = 0.65, linetype = "dashed", color = "black", size = 1) +
+  annotate("text",
+           x = 0.65,
+           y = max(plot_data$Value, na.rm = TRUE) * 1.02,
+           label = "0.65", color = "red", size = 4) +
+  labs(
+    x = "Prevalence Threshold for Core Microbiome Definition",
+    y = "Metric Value",
+    fill = "Metric"
+  ) +
+  theme_classic(base_size = 16) +
+  theme(
+    legend.position = "top",
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 16, face = "bold")
+  )
+
+# 🖼️ Plot 2: Faceted version
+p2 <- ggplot(plot_data, aes(
+  x = Prevalence,
+  y = Value,
+  fill = Metric,
+  group = interaction(Prevalence, Metric)
+)) +
+  geom_boxplot(
+    position = position_dodge(width = 0.6),
+    width = 0.5,
+    outlier.shape = NA,
+    color = "black"
+  ) +
+  facet_wrap(~ Metric, scales = "free_y") +
+  scale_fill_manual(values = c(
+    "Jaccard" = "#1f77b4B3",
+    "CumulativeAbundance" = "#2ca02cB3"
+  )) +
+  geom_vline(xintercept = 0.30, linetype = "dashed", color = "black", size = 1) +
+  annotate("text",
+           x = 0.30,
+           y = 1.02 * max(plot_data$Value, na.rm = TRUE),
+           label = "0.30", color = "red", size = 4) +
+  labs(
+    x = "Prevalence Threshold",
+    y = "Metric Value",
+    fill = "Metric"
+  ) +
+  theme_classic(base_size = 16) +
+  theme(
+    legend.position = "none",
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 16, face = "bold")
+  )
+
+# 👁️ Show plots
+print(p1)
+print(p2)
+
+---------------------------------------------------------Visualization of the Disease associated taxa--------------------------------------------------------------------------------------
+# Load required libraries
+library(tidyverse)
+library(ggthemes)
+library(scales)
+
+# Data
+df <- tribble(
+  ~Taxa, ~Population, ~R2, ~P_value, ~Prevalence,
+  "Bifidobacterium_longum", "Chenchu", 0.16, 0.001, 0.71,
+  "Bifidobacterium_longum", "Irula", 0.031, 0.036, 0.97,
+  "Flavonifractor_plautii", "Chenchu", 0.15, 0.001, 0.43,
+  "Flavonifractor_plautii", "Jenu Kuruba", 0.22, 0.002, 0.51,
+  "Blautia_wexlerae", "Konda Savara", 0.10, 0.004, 1,
+  "Ruminococcus_gnavus", "Chenchu", 0.13, 0.001, 0.76,
+  "Ruminococcus_gnavus", "Jenu Kuruba", 0.22, 0.002, 0.70,
+  "Collinsella_aerofaciens", "Konda Savara", 0.019, 0.048, 0.82,
+  "Bacteroides_fragilis", "Chenchu", 0.10, 0.001, 0.51,
+  "Bacteroides_fragilis", "Kurumba", 0.12, 0.002, 0.41,
+  "Bacteroides_fragilis", "Konda Savara", 0.05, 0.007, 0.52
+)
+
+# Reorder taxa by max R2
+df$Taxa <- fct_reorder(df$Taxa, df$R2, .fun = max)
+
+# Plot
+ggplot(df, aes(x = R2, y = Taxa)) +
+  geom_point(
+    aes(fill = Population, size = Prevalence, alpha = -log10(P_value)),
+    shape = 21, color = "black", stroke = 0.3
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  scale_size(range = c(3, 8)) +
+  scale_alpha(range = c(0.5, 1), name = expression(-log[10](P-value))) +
+  labs(
+    title = "Microbial Taxa Effect Size by Population",
+    subtitle = "Fill color = Population | Dot size = Prevalence | Transparency = Significance",
+    x = expression(R^2~"(Effect Size)"),
+    y = "Microbial Taxa",
+    fill = "Population",
+    size = "Prevalence"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.box = "vertical",
+    legend.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    axis.text.y = element_text(face = "italic")
+  )
+------------------------------------------------------------------Visualization of the community associated taxa based on closeness centrality and betweenness------------------------------
+library(tidyverse)
+
+# Load data
+df <- read.csv("All_core_keystone_taxa_top15.csv")
+
+# Convert to long format
+df_long <- df %>%
+  pivot_longer(cols = c(Degree, Betweenness, Closeness), names_to = "Metric", values_to = "Value")
+
+# Reorder taxa by Degree
+df_long$Taxa <- factor(df_long$Taxa, levels = df$Taxa[order(df$Degree, decreasing = TRUE)])
+
+ggplot(df_long, aes(x = Value, y = Taxa, fill = Metric)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ Metric, scales = "free_x") +
+  theme_minimal(base_size = 10) +
+  labs(title = "All_community",
+       x = "Centrality Value", y = "Taxa") +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(size = 6)  # <- this line reduces scale text size
+  )
+ 
+--------------------------------------------------------------------Log high fold change value calculation----------------------------------------------------------------------------------
+# -------------------- Load Libraries --------------------
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(dplyr) 
+
+
+# -------------------- Load and Format Data --------------------
+# Read count data (samples are rows, taxa are columns)
+count_data <- read.csv("Species_logfc.csv", row.names = 1)
+
+# Transpose: now rows = taxa, columns = samples
+count_data <- t(count_data)
+
+# Read metadata
+metadata <- read.csv("Logft_metadata.csv")
+rownames(metadata) <- metadata$SampleID
+
+# Ensure metadata matches count_data samples
+metadata <- metadata[colnames(count_data), ]
+stopifnot(all(rownames(metadata) == colnames(count_data)))  # Consistency check
+
+# -------------------- Pairwise DESeq2 Comparisons --------------------
+populations <- unique(metadata$Population)
+results_list <- list()
+significant_species_list <- list()
+logfc_matrix <- list()
+
+dir.create("volcano_plots", showWarnings = FALSE)
+
+for (i in 1:(length(populations)-1)) {
+  for (j in (i+1):length(populations)) {
+    group1 <- populations[i]
+    group2 <- populations[j]
+    pair_name <- paste(group1, "_vs_", group2, sep = "")
+    
+    cat("\n🔬 Running DESeq2 for:", pair_name, "\n")
+    
+    # Subset metadata and count matrix
+    metadata_pair <- metadata[metadata$Population %in% c(group1, group2), ]
+    metadata_pair$Population <- factor(metadata_pair$Population)
+    count_pair <- count_data[, rownames(metadata_pair)]
+    
+    # Create DESeq2 dataset
+    dds <- DESeqDataSetFromMatrix(countData = count_pair,
+                                  colData = metadata_pair,
+                                  design = ~ Population)
+    
+    # Filter low-abundance taxa
+    dds <- dds[rowSums(counts(dds)) > 10, ]
+    
+    # Fix for sparse data (zero counts)
+    dds <- estimateSizeFactors(dds, type = "poscounts")
+    dds <- DESeq(dds)
+    
+    res <- results(dds, contrast = c("Population", group1, group2))
+    res_df <- as.data.frame(res)
+    res_df$Species <- rownames(res_df)
+    
+    # Volcano Plot thresholds
+    res_df$threshold <- as.factor(abs(res_df$log2FoldChange) > 2 & res_df$padj < 0.05)
+    
+    p <- ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj), color = threshold)) +
+      geom_point(alpha = 0.8, size = 1.5) +
+      scale_color_manual(values = c("grey", "red")) +
+      geom_vline(xintercept = c(-2, 2), linetype = "dashed", color = "blue") +
+      geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+      labs(title = paste("Volcano Plot:", pair_name),
+           x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+      theme_minimal()
+    
+    ggsave(filename = paste0("volcano_plots/", pair_name, ".png"), plot = p, width = 7, height = 5)
+    
+    # Save results
+    results_list[[pair_name]] <- res_df
+    sig_df <- res_df %>%
+      filter(abs(log2FoldChange) > 2 & padj < 0.05) %>%
+      arrange(padj)
+    significant_species_list[[pair_name]] <- sig_df
+    
+    # Store for heatmap
+    if (nrow(sig_df) > 0) {
+      logfc_vector <- sig_df$log2FoldChange
+      names(logfc_vector) <- sig_df$Species
+      logfc_matrix[[pair_name]] <- logfc_vector
+    }
+  }
+}
+
+# Combine all results into one data frame
+all_results_df <- do.call(rbind, lapply(names(results_list), function(name) {
+  df <- results_list[[name]]
+  df$Comparison <- name
+  return(df)
+}))
+
+# Define threshold color (red for significant)
+all_results_df$threshold <- as.factor(abs(all_results_df$log2FoldChange) > 2 & all_results_df$padj < 0.05)
+
+# Clean NA values in padj (some DESeq results might have NAs for low counts)
+all_results_df <- all_results_df[!is.na(all_results_df$padj), ]
+
+# Combined Volcano Plot
+combined_volcano <- ggplot(all_results_df, aes(x = log2FoldChange, y = -log10(padj), color = threshold)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  scale_color_manual(values = c("grey", "red")) +
+  geom_vline(xintercept = c(-2, 2), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+  labs(title = "Combined Volcano Plot: All Population Comparisons",
+       x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme_minimal()
+
+ggsave("Combined_Volcano_Plot.png", combined_volcano, width = 8, height = 6)
+
+# Optional: Faceted volcano plot by comparison
+ggplot(all_results_df, aes(x = log2FoldChange, y = -log10(padj), color = threshold)) +
+  geom_point(alpha = 0.6, size = 1) +
+  scale_color_manual(values = c("grey", "red")) +
+  geom_vline(xintercept = c(-2, 2), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+  labs(title = "Faceted Volcano Plot by Comparison",
+       x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  facet_wrap(~Comparison, scales = "free") +
+  theme_minimal()
+
+
+# Combined Volcano Plot (SVG)
+combined_volcano <- ggplot(all_results_df, aes(x = log2FoldChange, y = -log10(padj), color = threshold)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  scale_color_manual(values = c("grey", "red")) +
+  geom_vline(xintercept = c(-2, 2), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+  labs(title = "Combined Volcano Plot: All Population Comparisons",
+       x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme_minimal()
+
+# Save as SVG
+ggsave("Combined_Volcano_Plot.svg", combined_volcano, width = 8, height = 6, device = "svg")
+
+# Create faceted volcano plot
+faceted_volcano <- ggplot(all_results_df, aes(x = log2FoldChange, y = -log10(padj), color = threshold)) +
+  geom_point(alpha = 0.6, size = 1) +
+  scale_color_manual(values = c("grey", "red")) +
+  geom_vline(xintercept = c(-2, 2), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+  labs(title = "Faceted Volcano Plot by Comparison",
+       x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  facet_wrap(~Comparison, scales = "free") +
+  theme_minimal()
+
+# Save as SVG
+ggsave("Faceted_Volcano_Plot.svg", faceted_volcano, width = 12, height = 8, device = "svg")
+
+-------------------------------------------Visualize with significant level
+
+# Clean NA padj values (remove rows with NA padj)
+all_results_df_clean <- all_results_df[!is.na(all_results_df$padj), ]
+
+# Redefine threshold column
+all_results_df_clean$threshold <- factor(
+  ifelse(abs(all_results_df_clean$log2FoldChange) > 2 & all_results_df_clean$padj < 0.05,
+         "Significant (|log2FC| > 2 & padj < 0.05)", 
+         "Not Significant")
+)
+
+# Create faceted volcano plot
+faceted_volcano <- ggplot(all_results_df_clean, aes(x = log2FoldChange, y = -log10(padj), color = threshold)) +
+  geom_point(alpha = 0.6, size = 1) +
+  scale_color_manual(
+    name = "Significance",
+    values = c("Significant (|log2FC| > 2 & padj < 0.05)" = "red", "Not Significant" = "grey")
+  ) +
+  geom_vline(xintercept = c(-2, 2), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+  labs(
+    title = "Faceted Volcano Plot by Comparison",
+    subtitle = "Threshold: |log2 Fold Change| > 2 and adjusted p-value < 0.05",
+    x = "log2 Fold Change",
+    y = "-log10 adjusted p-value"
+  ) +
+  facet_wrap(~Comparison, scales = "free") +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 10, face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+# Save as SVG
+ggsave("Faceted1_Volcano_Plot.svg", faceted_volcano, width = 14, height = 8, device = "svg")
+
+---------------------------------------------------Cumulative contribution of the gut associated taxa---------------------------------------------------------------------------------------
+
+# Load necessary packages
+library(tidyverse)
+
+# Read the files
+full_data <- read.csv("Cumulative_test.csv")
+target_taxa <- read.csv("Cumulative_taxa_test.csv")
+
+# Clean column names for consistency
+colnames(full_data)[1:2] <- c("Taxa", "Contribution")
+
+# Filter full dataset to retain only the taxa in target list
+filtered_data <- full_data %>%
+  filter(Taxa %in% target_taxa$Taxa)
+
+# Calculate total and target cumulative contribution
+total_cumulative <- sum(full_data$Contribution, na.rm = TRUE)
+target_cumulative <- sum(filtered_data$Contribution, na.rm = TRUE)
+percent_contribution <- round((target_cumulative / total_cumulative) * 100, 2)
+
+# Print summary
+cat("Total contribution of all taxa:", total_cumulative, "\n")
+cat("Cumulative contribution of selected taxa:", target_cumulative, "\n")
+cat("Percentage contribution:", percent_contribution, "%\n")
+
+# Bar plot: contribution of selected taxa
+ggplot(filtered_data, aes(x = reorder(Taxa, Contribution), y = Contribution)) +
+  geom_bar(stat = "identity", fill = "red") +
+  coord_flip() +
+  labs(title = "Cumulative Contribution of Selected Taxa",
+       subtitle = paste("Total:", target_cumulative, "|", percent_contribution, "% of all taxa"),
+       x = "Taxa", y = "Cumulative Contribution (%)") +
+  theme_minimal(base_size = 11)
+
+-------------------------------------------------------Quartile division of the taxa contribution
+# Load necessary packages
+library(tidyverse)
+
+# Read the files
+full_data <- read.csv("Cumulative_test.csv")
+target_taxa <- read.csv("Cumulative_taxa_test.csv")
+
+# Clean column names for consistency
+colnames(full_data)[1:2] <- c("Taxa", "Contribution")
+
+# Filter for target taxa
+filtered_data <- full_data %>%
+  filter(Taxa %in% target_taxa$Taxa)
+
+# Sort and compute cumulative stats
+filtered_data <- filtered_data %>%
+  arrange(desc(Contribution)) %>%
+  mutate(
+    Index = row_number(),
+    Cumulative = cumsum(Contribution),
+    Cumulative_Percent = Cumulative / sum(Contribution) * 100,
+    Quartile = ntile(Index, 4)
+  )
+
+# Quartile summary
+quartile_summary <- filtered_data %>%
+  group_by(Quartile) %>%
+  summarise(
+    Taxa_Count = n(),
+    Total_Contribution = round(sum(Contribution), 2)
+  )
+
+print(quartile_summary)
+
+# Compute quantile breakpoints for vertical lines
+quartile_breaks <- quantile(filtered_data$Index, probs = c(0.25, 0.5, 0.75))
+
+# Cumulative line plot with quartile breaks and annotations
+ggplot(filtered_data, aes(x = Index, y = Cumulative_Percent)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(color = "red", size = 2) +
+  geom_vline(
+    xintercept = quartile_breaks,
+    linetype = "dotted",
+    color = "gray40",
+    linewidth = 1.2
+  ) +
+  annotate("text", x = quantile(filtered_data$Index, 0.125), y = max(filtered_data$Cumulative_Percent),
+           label = paste0("Q1: ", quartile_summary$Taxa_Count[1], " taxa (", quartile_summary$Total_Contribution[1], "%)"),
+           hjust = 0, size = 4) +
+  annotate("text", x = quantile(filtered_data$Index, 0.375), y = max(filtered_data$Cumulative_Percent),
+           label = paste0("Q2: ", quartile_summary$Taxa_Count[2], " taxa (", quartile_summary$Total_Contribution[2], "%)"),
+           hjust = 0, size = 4) +
+  annotate("text", x = quantile(filtered_data$Index, 0.625), y = max(filtered_data$Cumulative_Percent),
+           label = paste0("Q3: ", quartile_summary$Taxa_Count[3], " taxa (", quartile_summary$Total_Contribution[3], "%)"),
+           hjust = 0, size = 4) +
+  annotate("text", x = quantile(filtered_data$Index, 0.875), y = max(filtered_data$Cumulative_Percent),
+           label = paste0("Q4: ", quartile_summary$Taxa_Count[4], " taxa (", quartile_summary$Total_Contribution[4], "%)"),
+           hjust = 0, size = 4) +
+  labs(
+    title = "Cumulative Contribution of Selected Taxa by Quartile",
+    x = "Taxa (ordered by contribution)", 
+    y = "Cumulative Contribution (%)"
+  ) +
+  theme_minimal(base_size = 14)
+
+-----------------------------------------------------------------------Lifestyle association of the Disease associated taxa-----------------------------------------------------------------
+library(tidyverse)
+library(ggpubr)
+library(reshape2)
+library(rstatix)
+
+# Read data
+df <- read.csv("All_community.csv")
+
+# Clean column names
+colnames(df) <- trimws(colnames(df))
+
+# Define metadata and taxa
+metadata_vars <- c("Population", "Acculturation", "Chewing", "Sex", "Drinking", "Smoking")
+microbial_taxa <- colnames(df)[8:13]
+
+# Add pseudocount for log transformation
+df[microbial_taxa] <- df[microbial_taxa] + 1e-6
+
+# Create output PDFs
+pdf("Boxplots1_Log_KW_Wilcoxon.pdf", width = 3.5, height = 3.5)
+
+# Boxplot: Kruskal-Wallis + pairwise Wilcoxon (log-transformed)
+for (meta in metadata_vars) {
+  for (taxon in microbial_taxa) {
+    df_sub <- df %>% filter(!is.na(.data[[meta]]))
+    
+    p <- ggplot(df_sub, aes_string(x = meta, y = taxon, fill = meta)) +
+      geom_boxplot(width = 0.3, outlier.size = 0.5, fatten = 2) +
+      stat_compare_means(method = "kruskal.test", label.y = log10(max(df[[taxon]]) * 1.5), size = 3.2) +
+      stat_compare_means(method = "wilcox.test", label = "p.signif", 
+                         comparisons = combn(unique(df_sub[[meta]]), 2, simplify = FALSE),
+                         tip.length = 0.01, size = 2.5) +
+      scale_y_log10() +
+      theme_minimal(base_size = 10) +
+      labs(title = paste("Kruskal & Wilcoxon:", taxon, "by", meta),
+           y = paste0("log10(", taxon, ")"), x = meta) +
+      theme(legend.position = "none",
+            axis.text.x = element_text(angle = 30, hjust = 1),
+            plot.title = element_text(size = 8, face = "bold"))
+    
+    print(p)
+  }
+}
+dev.off()
+
+# Create PDF for bar plots (mean ± SE)
+pdf("Barplots1_MeanSE.pdf", width = 3.5, height = 3.5)
+
+# Bar plots (mean ± SE)
+for (meta in metadata_vars) {
+  for (taxon in microbial_taxa) {
+    df_sub <- df %>% filter(!is.na(.data[[meta]])) %>%
+      group_by(.data[[meta]]) %>%
+      summarise(mean_val = mean(.data[[taxon]], na.rm = TRUE),
+                se_val = sd(.data[[taxon]], na.rm = TRUE) / sqrt(n())) %>%
+      rename(Group = 1)
+    
+    p <- ggplot(df_sub, aes(x = Group, y = mean_val, fill = Group)) +
+      geom_col(width = 0.5, alpha = 0.7) +
+      geom_errorbar(aes(ymin = mean_val - se_val, ymax = mean_val + se_val), width = 0.2) +
+      labs(title = paste("Mean ± SE:", taxon, "by", meta),
+           y = taxon, x = meta) +
+      theme_minimal(base_size = 10) +
+      theme(legend.position = "none",
+            axis.text.x = element_text(angle = 30, hjust = 1),
+            plot.title = element_text(size = 8, face = "bold"))
+    
+    print(p)
+  }
+}
+dev.off()
+---------------------------------------------
+  # Save median abundance tables
+  median_output_list <- list()
+
+for (meta in metadata_vars) {
+  for (taxon in microbial_taxa) {
+    df_sub <- df %>% filter(!is.na(.data[[meta]]))
+    
+    median_df <- df_sub %>%
+      group_by(.data[[meta]]) %>%
+      summarise(
+        Median_Abundance = median(.data[[taxon]], na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      mutate(
+        Taxon = taxon,
+        Metadata = meta
+      ) %>%
+      rename(Group = 1) %>%
+      select(Metadata, Taxon, Group, Median_Abundance)
+    
+    median_output_list[[paste(meta, taxon, sep = "_")]] <- median_df
+  }
+}
+
+# Combine all into one data frame and write to CSV
+final_median_table <- bind_rows(median_output_list)
+write.csv(final_median_table, "Median_Abundance_By_Group.csv", row.names = FALSE)
+-----------------------------------------------------------------------------------------
+  # Save mean and median abundance tables
+  summary_output_list <- list()
+
+for (meta in metadata_vars) {
+  for (taxon in microbial_taxa) {
+    df_sub <- df %>% filter(!is.na(.data[[meta]]))
+    
+    summary_df <- df_sub %>%
+      group_by(.data[[meta]]) %>%
+      summarise(
+        Mean_Abundance = mean(.data[[taxon]], na.rm = TRUE),
+        Median_Abundance = median(.data[[taxon]], na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      mutate(
+        Taxon = taxon,
+        Metadata = meta
+      ) %>%
+      rename(Group = 1) %>%
+      select(Metadata, Taxon, Group, Mean_Abundance, Median_Abundance)
+    
+    summary_output_list[[paste(meta, taxon, sep = "_")]] <- summary_df
+  }
+}
+
+# Combine all into one data frame and write to CSV
+final_summary_table <- bind_rows(summary_output_list)
+write.csv(final_summary_table, "Mean_Median_Abundance_By_Group.csv", row.names = FALSE)
+
+--------------------------------------Community Specific
+# Load required libraries
+library(tidyverse)
+library(ggpubr)
+
+# Read the data
+df <- read.csv("Disease_Kurumba.csv")
+
+# Define metadata and taxa
+metadata_vars <- c("Acculturation", "Chewing", "Sex", "Drinking", "Smoking")
+microbial_taxa <- colnames(df)[7:12]
+
+# Add pseudocount and log-transform the abundance columns
+df[microbial_taxa] <- log10(df[microbial_taxa] + 1e-6)
+
+# Save all plots to a PDF
+pdf("Kurumba.pdf", width = 3, height = 3)
+
+# Loop to create log-transformed bar plots with Wilcoxon test
+for (meta in metadata_vars) {
+  for (taxon in microbial_taxa) {
+    
+    # Compute dynamic y-label placement on log-scale
+    label_y <- max(df[[taxon]], na.rm = TRUE) + 0.2
+    
+    p <- ggplot(df, aes_string(x = meta, y = taxon, fill = meta)) +
+      stat_summary(fun = mean, geom = "bar", 
+                   position = position_dodge(width = 0.4), width = 0.3, alpha = 0.8) +
+      stat_summary(fun.data = mean_se, geom = "errorbar", 
+                   width = 0.2, position = position_dodge(width = 0.4)) +
+      stat_compare_means(method = "wilcox.test", label = "p.signif", 
+                         label.y = label_y) +
+      labs(title = paste("Wilcoxon Test:", taxon, "by", meta),
+           y = paste0("log10(", taxon, " + 1e-6)"), x = meta) +
+      theme_minimal(base_size = 10) +
+      theme(legend.position = "none",
+            plot.title = element_text(size = 6, face = "bold"),
+            axis.title = element_text(size = 6),
+            axis.text.x = element_text(angle = 30, hjust = 1, size = 6),
+            axis.text.y = element_text(size = 6))
+    
+    print(p)
+  }
+}
+
+dev.off()
+
+--------------------------------------------------------------------------------Functional analysis (Top 20 variable pathway)--------------------------------------------------------------
+# Load required library
+library(pheatmap)
+
+# Read the top 20 variable pathways CSV
+data <- read.csv("top20_variable_pathways.csv", row.names = 1)
+
+# Generate a simple heatmap without clustering
+pheatmap(data,
+         scale = "row",            # Normalize across pathways
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         color = colorRampPalette(c("navy", "white", "firebrick3"))(100),
+         fontsize_row = 8,
+         fontsize_col = 10,
+         border_color = NA,
+         main = "Top 20 Most Variable Pathways (No Clustering)")
+----------------------------------------------------------------------------------------
+  # Load necessary libraries
+  library(pheatmap)
+library(svglite)
+
+# Read the CSV file (preserve original column names)
+data <- read.csv("top20_variable_pathways.csv", row.names = 1, check.names = FALSE)
+
+# Save as publication-quality SVG
+svglite("Top20_Pathway_Heatmap.svg", width = 7, height = 5)
+
+# Plot heatmap without clustering and correct headings
+pheatmap(data,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         fontsize_row = 8,
+         fontsize_col = 10,
+         border_color = NA,
+         color = colorRampPalette(c("navy", "white", "firebrick3"))(100),
+         main = "Top 20 Most Variable Pathways")
+
+# Close the SVG device
+dev.off()
+
