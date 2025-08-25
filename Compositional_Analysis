@@ -77,7 +77,67 @@ ggplot(alpha_single, aes(x = Population, y = Diversity_Value, fill = Population)
     panel.border = element_rect(color = "black", fill = NA, size = 1.1),
     legend.position = "none"
   )
+------------------------------------------------------------------------------------------Beta Diversity----------------------------------------------------------------
+# Load libraries
+library(phyloseq)
+library(ggplot2)
+library(ggpubr)
+library(ggExtra)
+library(vegan)
 
+# Use raw (non-transformed) counts for Bray-Curtis
+ps_tr <- ps  # original object
+
+# Bray-Curtis ordination
+ord_bray <- ordinate(ps_tr, method = "PCoA", distance = "bray")
+
+# Extract ordination data
+ordination_df <- plot_ordination(ps_tr, ord_bray, color = "Community")$data
+
+# Base PCoA plot with larger point size
+base_pcoa <- ggplot(ordination_df, aes(x = Axis.1, y = Axis.2, color = Community)) +
+  geom_point(size = 3.5, alpha = 0.9) +
+  scale_color_manual(values = c(
+    "IRL" = "#00FFFF",   # Cyan
+    "JK"  = "#004586",   # Dark Blue
+    "KMB" = "#FF0000",   # Red
+    "CHE" = "#008000",   # Green
+    "KND" = "#FF00FF"    # Magenta
+  )) +
+  labs(
+    x = paste0("PCo1 (", round(100 * ord_bray$values$Relative_eig[1], 2), "%)"),
+    y = paste0("PCo2 (", round(100 * ord_bray$values$Relative_eig[2], 2), "%)"),
+    color = "Community"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 1),
+    axis.line = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11),
+    legend.position = "right"
+  )
+
+# Add marginal boxplots
+final_plot <- ggMarginal(
+  base_pcoa,
+  type = "boxplot",
+  margins = "both",
+  groupColour = TRUE,
+  groupFill = TRUE,
+  size = 5
+)
+
+# Show the plot
+print(final_plot)
+
+
+# Optional: PERMANOVA
+dist_bray <- phyloseq::distance(ps_tr, method = "bray")
+adonis_result <- vegan::adonis2(dist_bray ~ sample_data(ps_tr)$Community, permutations = 999)
+print(adonis_result)
 ------------------------------------------------------------------------------------------------Ven diagram---------------------------------------------------------------------------------
 library(UpSetR)
 # Read CSV
