@@ -1,1 +1,235 @@
+-----------------------------------------------------------------------------------CCA Analysis------------------------------------------------------------------------
+
+# Load required libraries
+library(vegan)
+library(ggplot2)
+library(ggrepel)
+
+# STEP 1: Load data
+df <- read.csv("Sprcc_analysis.csv", check.names = FALSE)
+colnames(df) <- trimws(colnames(df))  # Remove whitespace from column names
+
+# STEP 2: Define metadata column names
+metadata_cols <- c("Acculturation", "Population", "Sex", "Smoking", "Chewing", "Drinking")
+
+# STEP 3: Separate metadata and species
+env <- df[, metadata_cols]
+species_all <- df[, !(names(df) %in% metadata_cols)]
+
+# STEP 4: Keep only numeric species columns
+species <- species_all[, sapply(species_all, is.numeric)]
+
+
+
+# Convert all environmental variables to factors if character
+env[] <- lapply(env, function(x) if (is.character(x)) as.factor(x) else x)
+
+# STEP 2: Log-transform species abundance data
+species_log <- log1p(species)
+
+# STEP 3: Run Canonical Correspondence Analysis (CCA)
+cca_model <- cca(species_log ~ ., data = env)
+
+# STEP 4: Eigenvalues & variance explained
+eig_info <- summary(cca_model)$cont$importance
+eig_df <- as.data.frame(t(eig_info))
+write.csv(eig_df, "Final_1_cca_eigenvalues.csv", row.names = TRUE)
+
+# STEP 5: Species scores (coordinates in ordination space)
+species_scores <- as.data.frame(scores(cca_model, display = "species", scaling = 2))
+species_scores$Taxa <- rownames(species_scores)
+
+# STEP 6: Site scores and environmental vectors
+site_scores <- as.data.frame(scores(cca_model, display = "sites", scaling = 2))
+biplot_scores <- as.data.frame(scores(cca_model, display = "bp", scaling = 2))
+biplot_scores$Variable <- rownames(biplot_scores)
+
+# STEP 7: Permutation tests
+set.seed(123)
+overall_test <- anova(cca_model, permutations = 999)
+axis_test <- anova(cca_model, by = "axis", permutations = 999)
+
+# Combine permutation results
+overall_df <- data.frame(
+  Test = "Overall",
+  Df = overall_test$Df[1],
+  ChiSquare = overall_test$ChiSquare[1],
+  F_value = overall_test$F[1],
+  Pr = overall_test$"Pr(>F)"[1]
+)
+axis_df <- data.frame(
+  Test = paste0("Axis_", 1:nrow(axis_test)),
+  Df = axis_test$Df,
+  ChiSquare = axis_test$ChiSquare,
+  F_value = axis_test$F,
+  Pr = axis_test$"Pr(>F)"
+)
+perm_results <- rbind(overall_df, axis_df)
+write.csv(perm_results, "Final_1_cca_permutation_tests.csv", row.names = FALSE)
+
+# STEP 8: Plot CCA
+## Rescale biplot arrows for visibility
+biplot_scores$CCA1 <- biplot_scores$CCA1 * 3
+biplot_scores$CCA2 <- biplot_scores$CCA2 * 3
+
+## Axis labels
+eig_vals <- eigenvals(cca_model)
+prop_expl <- eig_vals / sum(eig_vals) * 100
+xlab <- paste0("CCA1 (", round(prop_expl[1], 1), "%)")
+ylab <- paste0("CCA2 (", round(prop_expl[2], 1), "%)")
+
+## Generate plot
+p <- ggplot() +
+  geom_point(data = site_scores, aes(x = CCA1, y = CCA2), color = "red", size = 1) +
+  geom_point(data = species_scores, aes(x = CCA1, y = CCA2), color = "darkgreen", size = 0.8) +
+  geom_text_repel(data = species_scores, aes(x = CCA1, y = CCA2, label = Taxa),
+                  color = "darkgreen", size = 1.8, max.overlaps = Inf, segment.color = NA) +
+  geom_segment(data = biplot_scores, aes(x = 0, y = 0, xend = CCA1, yend = CCA2),
+               arrow = arrow(length = unit(0.2, "cm")), color = "navy") +
+  geom_text_repel(data = biplot_scores, aes(x = CCA1, y = CCA2, label = Variable),
+                  color = "black", size = 3, segment.color = NA) +
+  labs(title = "CCA: Species + Environmental Vectors", x = xlab, y = ylab) +
+  theme_minimal()
+
+# Save plots
+ggsave("CCA_plot_1.png", plot = p, width = 8, height = 6, dpi = 300)
+ggsave("CCA_plot_1.pdf", plot = p, width = 8, height = 6)
+
+# STEP 9: Identify species vector association
+## Compute vector length
+species_scores$Vector_Length <- sqrt(species_scores$CCA1^2 + species_scores$CCA2^2)
+
+## Dominant axis
+species_scores$Dominant_Axis <- ifelse(abs(species_scores$CCA1) > abs(species_scores$CCA2), "CCA1", "CCA2")
+
+## Closest environmental vector using cosine similarity
+find_closest_vector <- function(s_x, s_y, env_df) {
+  sims <- apply(env_df[, c("CCA1", "CCA2")], 1, function(v) {
+    dot <- s_x * v[1] + s_y * v[2]
+    denom <- sqrt(s_x^2 + s_y^2) * sqrt(v[1]^2 + v[2]^2)
+    cos_sim <- dot / denom
+    return(cos_sim)
+  })
+  return(env_df$Variable[which.max(sims)])
+}
+
+species_scores$Most_Aligned_Vector <- apply(
+  species_scores[, c("CCA1", "CCA2")], 1,
+  function(row) find_closest_vector(row[1], row[2], biplot_scores)
+)
+
+# Reorder by strength of alignment
+species_scores <- species_scores[order(-species_scores$Vector_Length), ]
+
+# Save final annotated scores
+write.csv(species_scores, "Final_1_cca_species_vector_association.csv", row.names = FALSE)
+
+# Print top aligned taxa
+cat("Top 10 taxa with strongest axis + vector alignment:\n")
+print(head(species_scores, 10))
+
+---------------------------------------------------------------------------Statistical output visualization-------------------------------------------------------------
+# Load libraries
+  library(tidyverse)
+
+# Create the dataframe
+df <- tribble(
+  ~Test,      ~Df, ~ChiSquare, ~F_value, ~Pr,
+  "Overall",    9, 0.216252,   3.960086, 0.001,
+  "Axis_1",     1, 0.065015,  10.715279, 0.001,
+  "Axis_2",     1, 0.052672,   8.680992, 0.001,
+  "Axis_3",     1, 0.034975,   5.764252, 0.001,
+  "Axis_4",     1, 0.021974,   3.621568, 0.001,
+  "Axis_5",     1, 0.015267,   2.516174, 0.031,
+  "Axis_6",     1, 0.009681,   1.595571, 0.692,
+  "Axis_7",     1, 0.006547,   1.078998, 1,
+  "Axis_8",     1, 0.005829,   0.960764, NA,
+  "Axis_9",     1, 0.004291,   0.707179, NA,
+  "Axis_10",  172, 1.043618,         NA, NA
+)
+
+# Add significance and log10 transformed p-value
+df <- df %>%
+  mutate(
+    Significance = case_when(
+      is.na(Pr) ~ "NA",
+      Pr <= 0.05 ~ "Significant",
+      TRUE ~ "Not Significant"
+    ),
+    log10Pr = ifelse(!is.na(Pr), -log10(Pr), NA),
+    label_p = ifelse(!is.na(Pr), paste0("p=", Pr), NA)
+  )
+
+# Reshape for plotting
+df_long <- df %>%
+  select(Test, ChiSquare, F_value, log10Pr, Significance, label_p) %>%
+  pivot_longer(cols = c(ChiSquare, F_value, log10Pr),
+               names_to = "Metric", values_to = "Value") %>%
+  filter(!is.na(Value))
+
+# Rename metrics for plot
+df_long$Metric <- recode(df_long$Metric,
+                         ChiSquare = "Chi-square",
+                         F_value = "F-value",
+                         log10Pr = "-log10(P-value)")
+
+# Merge p-value labels only for the log10(P-value) facet
+df_long <- df_long %>%
+  mutate(label_to_show = ifelse(Metric == "-log10(P-value)", label_p, NA))
+
+# Plot with value labels on the -log10(P-value) facet
+ggplot(df_long, aes(x = Test, y = Value, fill = Significance)) +
+  geom_col() +
+  geom_text(aes(label = label_to_show), vjust = -0.3, size = 3.5, na.rm = TRUE) +
+  facet_wrap(~ Metric, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = c("Significant" = "#1b9e77", "Not Significant" = "#d95f02", "NA" = "gray70")) +
+  labs(
+    title = "Axis-wise Chi-square, F-value, and P-values",
+    x = "Test Axis",
+    y = "Value",
+    fill = "Significance"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+ coord_cartesian(clip = "off") +
+  theme(
+    plot.margin = margin(20, 20, 30, 20),  # top, right, bottom, left
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+----------------------------------------------------------------------------Dominant vector associated taxa------------------------------------------------------------------------
+# Load libraries
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+# Read data
+df <- read.csv("vector.csv")
+
+# Ensure numeric
+df$Vector_Length <- as.numeric(df$Vector_Length)
+
+# Plot
+p <- ggplot(df, aes(x = CCA1, y = CCA2)) +
+  # Arrows from origin to taxa coordinates
+  geom_segment(aes(x = 0, y = 0, xend = CCA1, yend = CCA2,
+                   color = Most_Aligned_Vector),
+               arrow = arrow(length = unit(0.25, "cm")), alpha = 0.7) +
+  # Points for taxa
+  geom_point(aes(size = Vector_Length, color = Most_Aligned_Vector), alpha = 0.8) +
+  # Labels
+  geom_text_repel(aes(label = Taxa, color = Most_Aligned_Vector),
+                  size = 3.2, show.legend = FALSE, max.overlaps = 25) +
+  # Scaling
+  scale_size_continuous(range = c(2,6)) +
+  # Theme
+  theme_minimal(base_size = 14) +
+  labs(x = "CCA1", y = "CCA2",
+       title = "Canonical Correspondence Analysis (Taxa vs Metadata)",
+       color = "Metadata Variable", size = "Vector Length") +
+  theme(legend.position = "right",
+        panel.grid.major = element_line(color = "grey85", linetype = "dashed"),
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(p)
 
