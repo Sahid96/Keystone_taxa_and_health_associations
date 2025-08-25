@@ -130,6 +130,234 @@ ggraph(as_tbl_graph(network), layout = "fr") +
   theme_void() +
   ggtitle("SparCC Network: Core Keystone Taxa and Community Clusters")
 
+------------------------------------------------------------------------Network Analysis------------------------------------------------------------------------------
+
+# ============================================================
+# Load libraries
+# ============================================================
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(tidyverse)
+library(compositions)
+
+# ============================================================
+# Load data
+# ============================================================
+abundance_raw <- read.csv("Kurumba.csv", check.names = FALSE)
+metadata <- read.csv("Sprcc_kurumba_meta.csv", stringsAsFactors = FALSE)
+
+rownames(abundance_raw) <- abundance_raw$Taxa
+abundance <- abundance_raw[, -1]  # Remove 'Taxa' column
+
+# ============================================================
+# Filter rare taxa
+# ============================================================
+taxa_prevalence <- colSums(abundance > 0)
+abundance_filtered <- abundance[, taxa_prevalence > 0]
+
+# ============================================================
+# CLR transformation
+# ============================================================
+clr_data <- clr(abundance_filtered + 1e-6)  # Avoid log(0)
+
+# ============================================================
+# Correlation matrix
+# ============================================================
+cor_matrix <- cor(clr_data, method = "pearson")
+cor_matrix[is.na(cor_matrix)] <- 0
+cor_matrix[abs(cor_matrix) < 0.3] <- 0  # Filter weak correlations
+
+# ============================================================
+# Positive & Negative networks
+# ============================================================
+pos_net <- graph_from_adjacency_matrix(cor_matrix * (cor_matrix > 0),
+                                       mode = "undirected", weighted = TRUE, diag = FALSE)
+pos_net <- delete.vertices(pos_net, degree(pos_net) == 0)
+
+neg_net <- graph_from_adjacency_matrix(abs(cor_matrix) * (cor_matrix < 0),
+                                       mode = "undirected", weighted = TRUE, diag = FALSE)
+neg_net <- delete.vertices(neg_net, degree(neg_net) == 0)
+
+# ============================================================
+# Function to calculate centrality
+# ============================================================
+get_centrality <- function(net, label) {
+  deg <- degree(net)
+  btw <- betweenness(net)
+  clo <- closeness(net)
+  
+  centrality_df <- data.frame(
+    Taxa = names(deg),
+    Degree = deg,
+    Betweenness = btw,
+    Closeness = clo,
+    Network = label
+  )
+  
+  top15 <- centrality_df %>%
+    arrange(desc(Degree), desc(Betweenness)) %>%
+    slice_head(n = 15)
+  
+  return(list(df = centrality_df, top = top15))
+}
+
+pos_cent <- get_centrality(pos_net, "Positive")
+neg_cent <- get_centrality(neg_net, "Negative")
+
+# ============================================================
+# Save results separately
+# ============================================================
+write.csv(pos_cent$df, "Positive_Network_Centrality.csv", row.names = FALSE)
+write.csv(neg_cent$df, "Negative_Network_Centrality.csv", row.names = FALSE)
+write.csv(pos_cent$top, "Positive_Top15_Keystone.csv", row.names = FALSE)
+write.csv(neg_cent$top, "Negative_Top15_Keystone.csv", row.names = FALSE)
+
+# ============================================================
+# Merge into a combined summary table
+# ============================================================
+summary_table <- full_join(
+  pos_cent$top %>% rename(Degree_Pos = Degree, Betweenness_Pos = Betweenness, Closeness_Pos = Closeness),
+  neg_cent$top %>% rename(Degree_Neg = Degree, Betweenness_Neg = Betweenness, Closeness_Neg = Closeness),
+  by = "Taxa"
+) %>%
+  mutate(
+    Role = case_when(
+      !is.na(Degree_Pos) & !is.na(Degree_Neg) ~ "Both",
+      !is.na(Degree_Pos) & is.na(Degree_Neg) ~ "Positive only",
+      is.na(Degree_Pos) & !is.na(Degree_Neg) ~ "Negative only"
+    )
+  ) %>%
+  arrange(Role, desc(Degree_Pos), desc(Degree_Neg))
+
+write.csv(summary_table, "Kurumba_Dual_Role_Keystone_Taxa.csv", row.names = FALSE)
+
+# ============================================================
+# Annotate nodes with metadata
+# ============================================================
+metadata$Taxa <- trimws(metadata$Taxa)
+
+annotate_net <- function(net, top_taxa) {
+  V(net)$name <- trimws(V(net)$name)
+  taxa_to_community <- setNames(metadata$Population, metadata$Taxa)
+  V(net)$Community <- taxa_to_community[V(net)$name]
+  V(net)$is_core <- ifelse(V(net)$name %in% top_taxa$Taxa, "core", "non-core")
+  return(net)
+}
+
+pos_net <- annotate_net(pos_net, pos_cent$top)
+neg_net <- annotate_net(neg_net, neg_cent$top)
+
+# ============================================================
+# Custom colors for communities
+# ============================================================
+custom_colors <- c(
+  "Chenchu" = "#008000",
+  "Irula" = "#00FFFF",
+  "Jenu Kuruba" = "#004586",
+  "Kurumba" = "#FF0000",
+  "Konda Savara" = "#FF00FF"
+)
+
+# ============================================================
+# Plot Positive Network
+# ============================================================
+ggraph(as_tbl_graph(pos_net), layout = "fr") +
+  geom_edge_link(color = "tomato", alpha = 0.7) +
+  geom_node_point(aes(color = Community, size = is_core), alpha = 0.9) +
+  geom_node_text(aes(label = ifelse(is_core == "core", name, "")),
+                 repel = TRUE, size = 3.5, fontface = "bold", color = "black") +
+  scale_color_manual(values = custom_colors, na.value = "gray50") +
+  scale_size_manual(values = c("core" = 6, "non-core" = 3)) +
+  theme_void() +
+  ggtitle("Positive Co-occurrence Network (Symbiotic)\nCore Keystone Taxa Highlighted")
+
+# ============================================================
+# Plot Negative Network
+# ============================================================
+ggraph(as_tbl_graph(neg_net), layout = "fr") +
+  geom_edge_link(color = "gray50", alpha = 0.7) +
+  geom_node_point(aes(color = Community, size = is_core), alpha = 0.9) +
+  geom_node_text(aes(label = ifelse(is_core == "core", name, "")),
+                 repel = TRUE, size = 3.5, fontface = "bold", color = "black") +
+  scale_color_manual(values = custom_colors, na.value = "steelblue") +
+  scale_size_manual(values = c("core" = 6, "non-core" = 3)) +
+  theme_void() +
+  ggtitle("Negative Co-exclusion Network (Antagonistic)\nCore Keystone Taxa Highlighted")
+------------------------------------------------------------------------------------------Visualization of the Dual_Role_Keystone----------------------------------------
+# =========================
+# Visualizing Dual-Role Keystone Taxa (R) - Dumbbell Plot
+# =========================
+
+# Load packages
+library(tidyverse)
+library(ggrepel)
+library(scales)
+
+# -------------------------
+# Load data
+# -------------------------
+df <- read.csv("Irula_Dual_Role_Keystone_Taxa.csv", check.names = FALSE)
+
+# Ensure expected column names
+df <- df |>
+  dplyr::rename(
+    Degree_Pos = Degree_Pos,
+    Degree_Neg = Degree_Neg,
+    Betweenness_Pos = Betweenness_Pos,
+    Betweenness_Neg = Betweenness_Neg,
+    Closeness_Pos = Closeness_Pos,
+    Closeness_Neg = Closeness_Neg
+  )
+
+# Order taxa by max degree
+df <- df |>
+  mutate(MaxDeg = pmax(Degree_Pos, Degree_Neg, na.rm = TRUE)) |>
+  arrange(desc(MaxDeg)) |>
+  mutate(Taxa = factor(Taxa, levels = unique(Taxa))) 
+
+# -------------------------
+# Dumbbell plot: Degree comparison
+# -------------------------
+deg_long <- df |>
+  select(Taxa, Role, Degree_Pos, Degree_Neg) |>
+  pivot_longer(cols = c(Degree_Pos, Degree_Neg),
+               names_to = "Network",
+               values_to = "Degree") |>
+  mutate(Network = recode(Network,
+                          "Degree_Pos" = "Positive",
+                          "Degree_Neg" = "Negative"))
+
+deg_wide <- deg_long |>
+  pivot_wider(names_from = Network, values_from = Degree)
+
+p_dumbbell <- ggplot(deg_wide, aes(y = Taxa)) +
+  # dotted connecting line
+  geom_segment(aes(x = Positive, xend = Negative, yend = Taxa), 
+               size = 0.8, color = "black", linetype = "dotted") +
+  # positive points
+  geom_point(aes(x = Positive, shape = Role), size = 1.8, color = "seagreen") +
+  # negative points
+  geom_point(aes(x = Negative, shape = Role), size = 1.8, color = "deeppink") +
+  labs(
+    title = "Dumbbell: Degree Centrality in Positive vs Negative Networks",
+    x = "Degree",
+    y = NULL,
+    shape = "Role"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 7),
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+# -------------------------
+# Show plot
+# -------------------------
+p_dumbbell
+
+
 ---------------------------------------------------------------------Alluvial plot of the differentially abundant species-------------------------------------------------------------------
 # Load required libraries
 library(tidyverse)
